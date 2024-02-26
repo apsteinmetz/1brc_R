@@ -14,7 +14,7 @@ library(tidypolars)
 library(arrow)
 library(microbenchmark)
 
-num_files <- 5 # 100 files of 10mm records each
+num_files <- 100 # 100 files of 10mm records each
 
 # BASE R -----------------------------------------------------------------------
 do_base <- function() {
@@ -220,7 +220,7 @@ plan(sequential)
 }
 do_arrow()
 
-tm <-  microbenchmark(do_base(),do_dplyr(), do_dtplyr(), do_dt(), do_duck_db(), do_arrow(), times = 1)
+tm <-  microbenchmark(do_base(),do_dplyr(), do_dtplyr(), do_dt(), do_duck_db(), do_arrow(), do_polars(),times = 1)
 tm
 as_tibble(tm) |> ggplot(aes(expr,time)) + geom_col()
 

@@ -4,8 +4,9 @@
 library(tidyverse)
 library(rvest)
 library(furrr)
-library(future)
+library(data.table)
 library(progressr)
+
 # Define constants
 # one billion records
 # ONE_BRP <- 1e9
@@ -51,38 +52,32 @@ if (file.exists("weather_stations.csv")) {
 }
 
 # Define function to generate weather station data
-generate_single_observation <- function(n = 1){
-   rownum <- sample(nrow(city_table), 1)
+generate_observations <- function(n){
+   rownum <- sample(nrow(city_table), n, replace = TRUE)
    city <- city_table$City[rownum]
-   obs_temp <- rnorm(1, mean = city_table$Year[rownum], sd = 10)
-   return(paste(city, round(obs_temp, 1), sep = ";"))
+   obs_temp <- rnorm(n, mean = city_table$Year[rownum], sd = 5)
+   return(as.data.frame(paste(city, round(obs_temp, 1), sep = ";")))
 }
 
 
-generate_multiple_observations <- function(n,chunk_size = CHUNK_SIZE,write_each_chunk = TRUE){
-   p()
-   if (write_each_chunk) {
-      write_lines(paste(replicate(chunk_size, generate_single_observation()), collapse = "\n"),
-                  file = paste0("data/chunk_",sprintf(paste0("%0",4, "d"), n),".txt"),
-                  append = FALSE)
-   } else {
-      return(paste(replicate(chunk_size, generate_single_observation()), collapse = "\n"))
+# -------------------------------------------------------------
+# sequential write of single file
+generate_measurement_file <- function(file_name = "data/measurements.txt",
+                                      records = ONE_BRP,
+                                      chunk_size = CHUNK_SIZE){
+   if (file.exists("data/measurements.txt")) {
+       file.remove("data/measurements.txt")
    }
+   num_chunks <- records/chunk_size
+   cat(paste("Creating measurement file ",file_name," with",format(records,big.mark = ","),"measurements...\n"))
+   tictoc::tic()
+   for (i in 1:num_chunks){
+      measurement <- generate_observations(chunk_size)
+      cat(paste("Writing chunk ",i," of ",num_chunks,"\n"))
+      fwrite(measurement, file = file_name,append = TRUE,showProgress = TRUE)
+   }
+   tictoc::toc()
 }
 
-
-# Set up a future plan
-# plan(sequential)
-plan(multisession)
-
-#  write each chunk to a separate file
-cat(" Starting jobs sequential\n")
-tictoc::tic()
-
-with_progress({
-   p <- progressr::progressor(NUM_CHUNKS)
-   chunks_combined <- future_walk(1:NUM_CHUNKS, generate_multiple_observations,
-                              .options = furrr_options(seed = 123))
-})
-tictoc::toc()
+generate_measurement_file()
 
