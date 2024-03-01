@@ -9,9 +9,9 @@ library(progressr)
 # Define constants
 # one billion records
 # ONE_BRP <- 1e9
-ONE_BRP <- 1e9
+ONE_BRP <- 1e6
 # create single file when chunk size is equal to ONE_BRP
-CHUNK_SIZE <- 1e7
+CHUNK_SIZE <- 1e6
 if( CHUNK_SIZE > ONE_BRP){
    stop("CHUNK_SIZE must be less than or equal to ONE_BRP")
 }
@@ -26,7 +26,6 @@ WRITE_EACH_CHUNK = FALSE
 if (file.exists("weather_stations.csv")) {
    city_table <- read_csv("weather_stations.csv",
                           show_col_types = FALSE)
-
 } else {
    # retrieve table from https://en.wikipedia.org/wiki/List_of_cities_by_average_temperature using rvest package
    # install.packages("rvest")

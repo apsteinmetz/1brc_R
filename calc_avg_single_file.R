@@ -16,16 +16,18 @@ library(tictoc)
 library(microbenchmark)
 
 
-num_records <- 1e8
-num_files = 100
+num_records <- 1e7
+num_files = 1
 
 
 read_single_file <- function(n){
-   fread(paste0("data/chunk_",sprintf(paste0("%0",8, "d"), n),".txt"),
+   cat(n)
+   fread(paste0("data/chunk_",sprintf(paste0("%0",4, "d"), n),".txt"),
          header = FALSE,
          col.names = c("city", "temp"),
          colClasses = c("character","numeric"),
-         sep=";")
+         sep=";",
+         showProgress = TRUE)
 }
 
 
@@ -35,27 +37,29 @@ make_full_dataset <- function(num_files){
    all_lines
 }
 
-expand_dataset <- function(all_lines){
+expand_dataset <- function(all_lines,num_recs = num_records){
    all_lines[rep(1:nrow(all_lines),
-                              num_records/nrow(all_lines))]
+                              num_recs/nrow(all_lines))]
 
 }
 
+expand_dataset_2 <- function(all_lines,num_recs = num_records){
+   slice_sample(all_lines,n=num_recs,replace = TRUE)
+}
+
 tictoc::tic()
-tidy_df <- make_full_dataset(num_files) |>
-   expand_dataset()
+tidy_df <- make_full_dataset(num_files) %>%
+   expand_dataset_2() %>% as_tibble()
 tictoc::toc()
-tidy_df <- as_tibble(tidy_df)
 
 # the standard by which all others are measured
 # data.table -------------------------------------------------------------------
 # compute the high/low /average temperature for each city from all_lines using data.table
 
-do_dt <- function() {
-   tidy_df |> as.data.table() |>
-   _[,.(high = max(temp), low = min(temp), avg = mean(temp), n = .N), by = city]
+do_dt <- function(df = tidy_df) {
+   df <- df |> as.data.table()
+   df[,.(high = max(temp), low = min(temp), avg = mean(temp), n = .N), by = city]
 }
-
 # BASE R -----------------------------------------------------------------------
 do_base <- function() {
    agg_lines <- aggregate(temp ~ city, data = tidy_df,
@@ -179,7 +183,8 @@ do_arrow <- function(df_arrow) {
 }
 
 
-tm <-  microbenchmark(do_dplyr(),
+tm <-  microbenchmark(do_base(),
+                      do_dplyr(),
                       do_dtplyr(),
                       do_dt(),
                       do_duckdb(use_duckplyr = FALSE),
@@ -188,10 +193,16 @@ tm <-  microbenchmark(do_dplyr(),
                       do_arrow(arrow_df),
                       do_polars(polars_df),
                       do_tidy_polars(polars_df),
-                      times = 1)
-tm
+                      times = 1) %>% as_tibble()
+tm <- tm %>% mutate(db = as.factor(c("arrow","duckdb","dplyr",
+                                     "data.table","arrow",
+                                     "data.table","duckdb","polars","polars")))
 # autoplot(tm)
-as_tibble(tm) |> ggplot(aes(expr,time)) + geom_col()
+tm |>
+   ggplot(aes(fct_reorder(expr,time),time/1e9,fill=db)) + geom_col() +
+   coord_flip() +
+   labs(x = "Database Method",y="Seconds")
+
 rm(arrow_df,polars_df,polars_lf)
 dbDisconnect(con, shutdown=TRUE)
 rm(con)
