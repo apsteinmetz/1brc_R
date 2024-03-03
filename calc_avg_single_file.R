@@ -2,9 +2,6 @@
 # load simulated weather station data and compute hi/lo/average temperature
 
 library(tidyverse)
-library(furrr)
-library(future)
-library(progressr)
 library(data.table)
 library(dtplyr)
 library(duckdb)
@@ -47,6 +44,7 @@ expand_dataset_2 <- function(all_lines,num_recs = num_records){
    slice_sample(all_lines,n=num_recs,replace = TRUE)
 }
 
+cat("making dataset")
 tictoc::tic()
 tidy_df <- make_full_dataset(num_files) %>%
    expand_dataset_2() %>% as_tibble()
@@ -56,10 +54,30 @@ tictoc::toc()
 # data.table -------------------------------------------------------------------
 # compute the high/low /average temperature for each city from all_lines using data.table
 
-do_dt <- function(df = tidy_df) {
-   df <- df |> as.data.table()
-   df[,.(high = max(temp), low = min(temp), avg = mean(temp), n = .N), by = city]
+
+do_data.table <- function(df = tidy_df) {
+   if ("data.table" %in% class(df)) {
+      df[, .(
+         high = max(temp),
+         low = min(temp),
+         avg = mean(temp),
+         n = .N
+      ), by = city]
+   } else{
+      tidy_df |>
+         as.data.table() |>
+         lazy_dt(immutable = FALSE) |>
+         group_by(city) |>
+         summarize(
+            high = max(temp),
+            low = min(temp),
+            avg = mean(temp),
+            n = n()
+         ) |>
+         collect()
+   }
 }
+
 # BASE R -----------------------------------------------------------------------
 do_base <- function() {
    agg_lines <- aggregate(temp ~ city, data = tidy_df,
@@ -77,25 +95,15 @@ do_dplyr <- function() {
       summarize(high = max(temp), low = min(temp), avg = mean(temp))
    }
 
-# DTPLYR -----------------------------------------------------------------------
-do_dtplyr <- function() {
-   tidy_df |>
-      as.data.table() |>
-      lazy_dt(immutable = FALSE) |>
-      group_by(city) |>
-      summarize(high = max(temp), low = min(temp), avg = mean(temp), n = n()) |>
-      collect()
-}
 
 # DUCkDB -----------------------------------------------------------------------
 # compute the high/low /average temperature for each city from all_lines using duckdb
-con = dbConnect(duckdb(), ":memory:")
-duckdb_register(con, "duckdb_df", tidy_df)
-duckdb_df <- tbl(con, "duckdb_df")
 
-do_duckdb <- function(use_duckplyr = FALSE) {
-   if (use_duckplyr) {
-      duckdb_df |>
+do_duckdb <- function(use_tidy = TRUE) {
+   # duckdb_register(con, "duck_df",overwrite = TRUE, orig_df)
+   if (use_tidy) {
+      # convert tibble to duckdb table
+      result  <- as_duckplyr_df(tidy_df) %>%
          group_by(city) |>
          summarize(
             high = max(temp),
@@ -103,28 +111,37 @@ do_duckdb <- function(use_duckplyr = FALSE) {
             avg = mean(temp)
          )
    } else {
+      con <- dbConnect(duckdb::duckdb())
+      duckdb_register(con, "duck_df",overwrite = TRUE, tidy_df)
       # achieve the same result with dbGetQuery
-      dbGetQuery(
+      result <- dbGetQuery(
          con,
-         "SELECT city, AVG(temp) as avg, MIN(temp) as low, MAX(temp) as high FROM duckdb_df GROUP BY city"
-      ) |>
-         as_tibble()
-
+         "SELECT city, AVG(temp) as avg, MIN(temp) as low, MAX(temp) as high FROM duck_df GROUP BY city"
+      )
+      result
+      dbDisconnect(con,shutdown = TRUE)
+      rm(con)
    }
+   return(result)
 }
 
-
 # POLARS  -------------------------------------------------------------------
-polars_lf <- tidy_df |> as_polars_lf()
-polars_df <- tidy_df |> as_polars_df()
-do_polars <- function(df_polars) {
-   # takes a polars dataframe and computes the high/low/average temperature for each city
-   result <- df_polars$group_by("city")$agg(
+do_polars <- function(df) {
+   if("tbl" %in% class(df)){
+      result <- df |>
+         group_by(city) |>
+         summarize(high = max(temp),
+                   low = min(temp),
+                   avg = mean(temp)) |>
+         arrange(city)
+      return(result)
+   }
+   result <- df$group_by("city")$agg(
       pl$col("temp")$sum()$alias("avg"),
       pl$col("temp")$min()$alias("low"),
       pl$col("temp")$max()$alias("high")
    )
-   if(class(df_polars) == "RPolarsLazyFrame"){
+   if(class(df) == "RPolarsLazyFrame"){
       result |> collect()
    } else {
       result
@@ -134,15 +151,15 @@ do_polars <- function(df_polars) {
 }
 
 # TIDYOLARS  -------------------------------------------------------------------
-do_tidy_polars <- function(df_polars) {
-   tidy_df |>
-      group_by(city) |>
-      summarize(high = max(temp),
-                low = min(temp),
-                avg = mean(temp)) |>
-      arrange(city) |>
-      as_tibble()
-}
+# do_tidy_polars <- function(df_polars) {
+#    tidy_df |>
+#       group_by(city) |>
+#       summarize(high = max(temp),
+#                 low = min(temp),
+#                 avg = mean(temp)) |>
+#       arrange(city) |>
+#       as_tibble()
+# }
 
 # autoplot(bm)
 # clean up
@@ -151,12 +168,11 @@ gc()
 # bm |> ggplot(aes(y = expr, x = time/1e8)) + geom_col() + theme_minimal() |>
 #    labs(title = "Polars vs Tidypolars",
 #         subtitle = "Time in seconds",
-#         x = "Time (Seconds to Process 100 million records)",
+#         x = "Time (Seconds to Process 100 million records)"
 #         y = "Function")
 
 
 # ARROW -----------------------------------------------------------------------
-arrow_df <- tidy_df |> arrow_table()
 do_arrow <- function(df_arrow) {
    if ("ArrowObject" %in% class(df_arrow)) {
       df_arrow |>
@@ -182,33 +198,49 @@ do_arrow <- function(df_arrow) {
    }
 }
 
+cat("coecring tidy to data.table\n")
+DT_df <- as.data.table(tidy_df)
+cat("coecring tidy to polars\n")
+polars_lazy <- tidy_df |> as_polars_lf()
+polars_data <- tidy_df |> as_polars_df()
+cat("coecring tidy to arrow\n")
+arrow_df <- tidy_df |> arrow_table()
 
-tm <-  microbenchmark(do_base(),
-                      do_dplyr(),
-                      do_dtplyr(),
-                      do_dt(),
-                      do_duckdb(use_duckplyr = FALSE),
-                      do_duckdb(use_duckplyr = TRUE),
-                      do_arrow(tidy_df),
+cat("running benchmark\n")
+times <- 10
+tm <-  microbenchmark(do_dplyr(),
+                      do_data.table(DT_df),
+                      do_data.table(tidy_df),
+                      do_duckdb(use_tidy = FALSE),
+                      do_duckdb(use_tidy = TRUE),
                       do_arrow(arrow_df),
-                      do_polars(polars_df),
-                      do_tidy_polars(polars_df),
-                      times = 1) %>% as_tibble()
-tm <- tm %>% mutate(db = as.factor(c("arrow","duckdb","dplyr",
-                                     "data.table","arrow",
-                                     "data.table","duckdb","polars","polars")))
-# autoplot(tm)
-tm |>
-   ggplot(aes(fct_reorder(expr,time),time/1e9,fill=db)) + geom_col() +
-   coord_flip() +
-   labs(x = "Database Method",y="Seconds")
+                      do_arrow(tidy_df),
+                      do_polars(polars_data),
+                      do_polars(polars_lazy),
+                      do_polars(tidy_df),
+                      times = times)
+if (times ==1){
+   tm <- tm %>% as_tibble() %>% arrange(expr) %>%
+      mutate(
+         db = as.factor(
+            c(
+               "dplyr",
+               "data.table","data.table",
+               "duckdb","duckdb",
+               "arrow","arrow",
+               "polars","polars","polars")))
+   tm |>
+      ggplot(aes(fct_reorder(expr,time),time/1e9,fill=db)) + geom_col() +
+      coord_flip() +
+      labs(x = "Database Method",y="Seconds")
 
-rm(arrow_df,polars_df,polars_lf)
-dbDisconnect(con, shutdown=TRUE)
-rm(con)
-rm(duckdb_df)
+   tm |>
+      ggplot(aes(expr,time/1e9,fill=db)) + geom_col() +
+      coord_flip() +
+      labs(x = "Database Method",y="Seconds")
+
+} else autoplot(tm)
+
+# rm(arrow_df,polars_data,polars_lazy)
 gc()
-
-
-
 
