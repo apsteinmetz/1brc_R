@@ -1,0 +1,221 @@
+---
+title: "The Truth About Tidy Wrappers"
+author: "Arthur Steinmetz"
+format: html
+editor: visual
+---
+
+```{r load packages}
+#| echo: false
+#| warning: false
+
+library(tidyverse)
+library(data.table)
+library(dtplyr)
+library(duckdb)
+library(duckplyr)
+library(polars)
+library(tidypolars)
+library(arrow)
+library(tictoc)
+library(microbenchmark)
+```
+
+## The Tidyverse
+
+I love "The Tidyverse." The biggest evolution of the R langage ecosystem since its inception was the introduction of `dplyr` and, subsequently, dozens of related packages. `dplyr` established what is, in effect, a new vernacular for manipulating data frames that is supremely readable. This is not welcome by everyone as verbosity is preferred in the Tidyverse over efficiency. Consider two snippets of code that summarize a few numbers, the first in base R and the second using dplyr.
+
+```{r base_r example}
+# base R
+do_base <- function(df) {
+   agg_lines <- aggregate(temp ~ city, data = df,
+                          FUN = function(x) c(summary=summary(x)))
+   agg_lines <- cbind(agg_lines[-2],as.data.frame(agg_lines$temp))[c(-3,-4,-6)]
+   names(agg_lines) <- c("city","min","avg","max")
+   agg_lines[-5]
+}
+```
+
+```{r dplyr example}
+# dplyr
+do_dplyr <- function(df) {
+   df |>
+      as.data.frame() |>
+      group_by(city) |>
+      summarize(high = max(temp), low = min(temp), avg = mean(temp))
+   }
+```
+
+The first example is very hard to decipher while the second is quite understandable without even knowing what the purpose of the function is. As it happens, `dplyr` is usually faster than base R by a fair amount.
+
+## The Need for Speed
+
+As we start working with larger and larger datasets, the basic tools of the tidyverse start to look a little slow. In the last few years several packages more suited to large datasets have emerged. Some of these are column, rather than row, oriented, notably `DuckDB.` Other speedy databases that have made their way into the R ecosystem are `Arrow`, `data.table`, and `Polars`. All of these are available for Python as well. Each of these carries with it its own interface and learning curve. `DuckDB`, for example is a dialect of SQL, an entirely different language. Our dplyr code above has to look like this:
+
+```{r duckdb example}
+#| eval: false
+result <- dbGetQuery(
+         con,
+         "SELECT city, AVG(temp) as avg, MIN(temp) as low, MAX(temp) as high FROM duck_df GROUP BY city"
+      )
+```
+
+It's pretty readable but if you don't know the lingo, translating will slow you down. Fear not! Help is at hand. Everyone of these database packages has a `dplyr` vernacular wrapper. This is a huge convenience. You can write the readable `dplyr` code and it just works. Switching between and testing all of these databases requires only minor changes in your code.
+
+The `dplyr` wrappers are not a complete free lunch. There are two sources of overhead that mean the `dplyr` code should be slightly slower than using the native interface. First, the dataset, which we assume starts out as a typical R data frame, must be converted into the target database format. Second, some time must be taken to convert the `dplyr` code to the target database code. Obviously, if your dataset is already in the file format of the database package, the first issue goes away.
+
+The objective of this experiment is to see, first, if there is a clear winner among the alternative databases and, second, see just how much overhead there is in code translation. Put another way, is the speed pickup once we move into the database pacakge environment worth the trade off in time converting an R data frame to a database object.
+
+The inspiration for this project came from the "Billion Row Challenge," created by Gunnar Morling, to see how fast a Java program can aggregate one billion rows of data. We are not interested in absolute speed, but relative speed among different approaches. 100 million rows should be sufficient, don't you think? We will handle the dataset as one object. If we were optimizing for speed, chopping the data into chunks for parallel processing would be something to try.
+
+## Make the Data Set
+
+Let's start be creating the dummy data set, a list of temperature observations for World cities. The core will be actual mean annual temperature for about 400 cities from Wikipedia. Then we randomly add observations around the mean, up to the desired size. In the interest of speed, I chose to use the random process to generate the first 10 million rows and then copied that 10 times to reach 100 million rows. It's all fake data, anyway. First, scrape the cities and temparatures from Wikipedia. Be aware that wikipedia page layouts change frequently so what worked today (March, 2024) might not work tomorrow.
+
+```{r get cities}
+#| eval: true
+
+if (file.exists("weather_stations.csv")) {
+   city_table <- read_csv("weather_stations.csv",
+                          show_col_types = FALSE)
+} else {
+   # retrieve table from https://en.wikipedia.org/wiki/List_of_cities_by_average_temperature using rvest package
+   continents <- ""
+   url <-
+      "https://en.wikipedia.org/wiki/List_of_cities_by_average_temperature"
+   webpage <- read_html(url)
+   city_table <- html_nodes(webpage, "table") %>%
+      html_table(fill = TRUE) %>%
+      bind_rows() |>
+      as_tibble() |>
+      select(-Ref.) |>
+      # remove all numbers in parentheses from all columns using across() and str_remove()
+      mutate(across(everything(), \(x) str_remove_all(x, "\\(.*\\)"))) |>
+      # mutate to numeric all columns except City and Country
+      mutate(across(-c(City, Country), as.numeric)) |>
+      # remove all rows with NA values
+      drop_na()
+   # write the table to a csv file
+   write_csv(city_table, "weather_stations.csv")
+}
+```
+
+Now generate random observations based on the city name and average temperature
+```{r}
+# Define function to generate weather station data
+num_records = 1e8
+
+generate_observations <- function(n){
+   rownum <- sample(nrow(city_table), n, replace = TRUE)
+   city <- city_table$City[rownum]
+   obs_temp <- rnorm(n, mean = city_table$Year[rownum], sd = 10)
+   return(tibble(city = city, temp = round(obs_temp, 1)))
+}
+
+
+cat("making dataset\n")
+tictoc::tic()
+tidy_df <- generate_observations(num_records)
+tictoc::toc()
+```
+Now we can process this data set using each of the database packages using both the native interface and the `dplyr` wrapper.  We want to know which database is fastest and what the performance loss is from using the wrapper.  First let's establish that base R is not in the running by comparing it to the default of `dplyr`, using the code already shown above.
+
+```{r}
+#| warning: false
+microbenchmark(do_base(tidy_df),do_dplyr(tidy_df),times = 1,unit = "seconds")
+```
+`dplyr` is 10 times faster than base R. It can process 100 million rows in about 4 seconds.  How does that stack up against the competition. First up is the venerable `data.table` This has been around a long time and is the R community's first choice when speed is needed.  The `dtplyr` package wraps it with `dplyr` syntax.  The function below uses the native interface if it sees a `data.table` object, and the `dtplyr` interface otherwise, where it converts the data frame to a data.table object first.  If we are working with `data.table` objects throughout our workflow we an also see the performance effect of code translation when using `dplyr` verbs.
+
+```{r do data table}
+do_data.table <- function(df = tidy_df, force_tidy = FALSE) {
+   if ("data.table" %in% class(df)) {
+      if (force_tidy) {
+         df[, .(
+            high = max(temp),
+            low = min(temp),
+            avg = mean(temp),
+            n = .N
+         ), by = city]
+      } else {
+         df %>% 
+            group_by(city) |>
+            summarize(
+               high = max(temp),
+               low = min(temp),
+               avg = mean(temp),
+               n = n()
+            )
+      }
+   } else{
+      df |>
+         as.data.table() |>
+         lazy_dt(immutable = FALSE) |>
+         group_by(city) |>
+         summarize(
+            high = max(temp),
+            low = min(temp),
+            avg = mean(temp),
+            n = n()
+         ) |>
+         collect()
+   }
+}
+
+DT_df <- as.data.table(tidy_df)
+bm_dt <-microbenchmark(do_data.table(tidy_df),
+               do_data.table(DT_df,force_tidy = FALSE),
+               do_data.table(DT_df,force_tidy = TRUE), unit="seconds")
+bm_dt
+```
+This is interesting because it shows that there is very little overhead in translating the `dplyr` syntax to `data.table`. The slowdown comes from converting the data frame to a `data.table` object.  Presumably that only needs to be done once and then our work can continue to be on the `data.table`.  What is surprising is that `data.table` dosen't seem much faster than `dplyr`! Is this a consequence of the particualar manipulations we are doing?  I don't know.
+
+Moving on to a database that's made a real splash in the Python community, `Polars`.  There is an R version, although it's not on CRAN so you have to install it from [here](). Get `tidypolars` [here]().  This is pretty new so it's a work in progress.  The syntax of the native version is `pythonic` so it will be familiar to many of you.  Once again the main time drag is converting to a `polars` data frame.
+```{r}
+do_polars <- function(df = tidy_df, force_tidy = FALSE) {
+   if ("tbl" %in% class(df)) {
+      result <- df |>
+         as_polars_df() %>%
+         group_by(city) |>
+         summarize(
+            high = max(temp),
+            low = min(temp),
+            avg = mean(temp)
+         ) |>
+         arrange(city)
+      return(result)
+   }
+   if (force_tidy) {
+      result <- df |>
+         as_polars_df() %>%
+         group_by(city) |>
+         summarize(
+            high = max(temp),
+            low = min(temp),
+            avg = mean(temp)
+         ) |>
+         arrange(city)
+      return(result)
+   }
+   
+   result <- df$group_by("city")$agg(
+      pl$col("temp")$sum()$alias("avg"),
+      pl$col("temp")$min()$alias("low"),
+      pl$col("temp")$max()$alias("high")
+   )
+   if (class(df) == "RPolarsLazyFrame") {
+      result |> collect()
+   } else {
+      result
+   }
+}
+
+polars_df <- tidy_df %>% as_polars_df()
+
+bm_polars <- microbenchmark(do_polars(tidy_df),
+               do_polars(polars_df),
+               do_polars(polars_df,force_tidy = TRUE),
+               times = 1, unit="seconds")
+
+bm_polars
+```
+Again, the overhead in converting an R data frame to polars is considerable. .

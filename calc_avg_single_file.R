@@ -12,7 +12,6 @@ library(arrow)
 library(tictoc)
 library(microbenchmark)
 
-
 num_records <- 1e7
 num_files = 1
 
@@ -83,9 +82,20 @@ do_base <- function() {
    agg_lines <- aggregate(temp ~ city, data = tidy_df,
                           FUN = function(x) c(summary=summary(x), n=length(x)))
    agg_lines <- cbind(agg_lines[-2],as.data.frame(agg_lines$temp))[c(-3,-4,-6)]
-   names(agg_lines) <- c("city","min","avg","max","n")
+   names(agg_lines) <- c("city","min","avg","max")
    agg_lines[-5]
 }
+
+
+
+   # Rename columns
+   colnames(summary_stats) <- c("city", "low", "avg", "high")
+
+   # Return the result
+   summary_stats
+}
+
+do_optimized()
 
 # DPLYR -----------------------------------------------------------------------
 do_dplyr <- function() {
