@@ -19,25 +19,25 @@ library(tidypolars)
 library(arrow)
 library(tictoc)
 library(microbenchmark)
+library(gt)
 ```
 
 ## The Tidyverse
 
-I love "The Tidyverse." The biggest evolution of the R language ecosystem since its inception was the introduction of `dplyr` and, subsequently, dozens of related packages. `dplyr` established what is, in effect, a new vernacular for manipulating data frames that is supremely readable. This is not welcome by everyone as verbosity is preferred in the Tidyverse over conciseness. Consider two snippets of code that summarize a few numbers, the first in base R and the second using dplyr.
+I love "The Tidyverse." The biggest evolution of the R language ecosystem since its inception was the introduction of `dplyr` and, subsequently, dozens of related packages. `dplyr` established what is, in effect, a new vernacular for manipulating data frames that is supremely readable. This is not welcome by everyone as verbosity is preferred in the Tidyverse over conciseness. Consider two snippets of code that summarize a column of numbers, the first in base R and the second using dplyr.
 
 ```{r base_r example}
 # base R
 do_base <- function(df) {
    agg_lines <- aggregate(temp ~ city, data = df,
-                          FUN = function(x) c(summary=summary(x)))
-   agg_lines <- cbind(agg_lines[-2],as.data.frame(agg_lines$temp))[c(-3,-4,-6)]
-   names(agg_lines) <- c("city","min","avg","max")
-   agg_lines[-5]
+                          FUN = function(x) c(avg=mean(x),high=max(x),low=min(x)))
+   # convert matrix column to data frame columns
+   cbind(city=agg_lines$city,as.data.frame(agg_lines$temp))
 }
 ```
 
 ```{r dplyr example}
-# dplyr
+# dplyr 
 do_dplyr <- function(df) {
    df |>
       as.data.frame() |>
@@ -113,7 +113,6 @@ if (file.exists("weather_stations.csv")) {
 Now generate random observations based on the city name and average temperature
 
 ```{r generate observations}
-#| cache.lazy: false
 # Define function to generate weather station data
 num_records = 1e8
 
@@ -125,7 +124,7 @@ generate_observations <- function(n){
 }
 
 
-cat("making dataset\n")
+cat("Making Dataset ")
 tictoc::tic()
 tidy_df <- generate_observations(num_records)
 tictoc::toc()
@@ -133,12 +132,22 @@ tictoc::toc()
 
 Now we can process this data set using each of the database packages using both the native interface and the `dplyr` wrapper. We want to know which database is fastest and what the performance loss is from using the wrapper. First let's establish that base R is not in the running by comparing it to the default of `dplyr`, using the code already shown above and a subset of the data.
 
-```{r}
+```{r do_base}
 #| warning: false
-microbenchmark(do_base(tidy_df[1:1e7,]),do_dplyr(tidy_df[1:1e7,]),times = 1,unit = "seconds")
+
+#quicky function to clean up benchmark results.  Show only median seconds to process.
+qbench <- function(mb_result){
+   # extract the median time in seconds
+   mb_result |> 
+      group_by(expr) |>
+      summarize(seconds = median(time)/1e9)
+   
+}
+qbench(microbenchmark(do_base(tidy_df[1:1e7,]),do_dplyr(tidy_df[1:1e7,]),times = 3,unit = "seconds"))
+
 ```
 
-`dplyr` is around 10 times faster than base R. How does that stack up against the competition. 
+`dplyr` is much faster than base R. How does that stack up against the competition. 
 
 ## data.table
 
@@ -188,7 +197,7 @@ bm_dt <-microbenchmark(do_data.table(tidy_df),
                do_data.table(DT_df,force_tidy = FALSE),
                do_data.table(DT_df,force_tidy = TRUE), 
                do_dplyr(tidy_df),times= 1,unit="seconds")
-bm_dt
+qbench(bm_dt) |> gt()
 ```
 
 This is very little overhead in translating the `dplyr` syntax to `data.table`. The slowdown comes from converting the data frame to a `data.table` object. If you do that every time, `data.table` is slower than `dplyr`. Try to convert your dataset only once and then work can continue to be on the `data.table`. 
@@ -227,14 +236,14 @@ arrow_df <- tidy_df |> arrow_table()
 bm_arrow <-  microbenchmark(do_arrow(arrow_df),
                             do_arrow(tidy_df),
                             times = 1)
-bm_arrow
+qbench(bm_arrow) |> gt()
 ```
 
 We see a nice speedup over the previous methods although only when we start out in the `arrow` format. The overhead of converting the data frame to an `arrow` table is significant.  So if you want to use `arrow` you'll be right at home with the `dplyr` syntax but you should store and retrieve your data in native the `arrow` and `parquet` formats.
 
 ## Polars
 
-Moving on to a database that's made a real splash in the Python community, `Polars`. There is an R version, although it's not on CRAN so you have to install it from [here](). The`tidypolars` companion is [here](https://tidypolars.etiennebacher.com/). This is pretty new so it's a work in progress. This package is a tremendous work but coverage of `dplyr` verbs is not 100%.  The syntax of the native version in R is `pythonic` so it will be familiar to python folks but R-only users can be very grateful for `tidypolars`. Once again the main time drag is converting to a `polars` data frame.
+Moving on to a database that's made a real splash in the Python community, `Polars`. There is an R version, although it's not on CRAN so you have to install it from [here](). The`tidypolars` companion is [here](https://tidypolars.etiennebacher.com/). This is pretty new so it's a work in progress. This package is a tremendous work but coverage of `dplyr` verbs is not 100%.  The syntax of the native version in R is "pythonic," so it prefers object methods over functions. It will be familiar to Python folks but R-only users can be very grateful for `tidypolars`. Once again the main time drag is converting to a `polars` data frame.
 
 Polars uses the same columnar format as Arrow, but Polars has a secret weapon in that it does parallel processing by default. This is a big advantage when working with large data sets. Setup time for multi-threading is non-trivial so it really only shines on large data sets.  Don't worry. It all happens in the background.  You don't have to lift a finger.
 
@@ -287,7 +296,7 @@ bm_polars <- microbenchmark(do_polars(tidy_df),
                do_polars(polars_df,force_tidy = TRUE),
                times = 1, unit="seconds")
 
-bm_polars
+qbench(bm_polars) |> gt()
 ```
 
 Pretty speedy!  We've halved the time shown by `arrow`. Not only that, the performance of the `tidypolars` wrapper is great!  We take only a tiny performance hit. Again, the overhead in converting an R data frame to polars is considerable. .We are much better off if we start out with a `polars` data frame or stay in that format after converting once.  If you want to use `polars` end-to-end, the file format that matches the in-memory structure of a `polars` data frame is the Apache `parquet` format also contained in the `arrow` package. To read and write `parquet` files with `polars`, use the `pl_read_parquet()` function and `.$write_parquet` method from the `polars` package.
@@ -300,12 +309,13 @@ Note the use inclusion of a 'lazy' data frame. Delaying query execution until al
 Our final contender is `DuckDB`. This is a relational database that supports "Structured Query Language" (SQL).   SQL is easy to read but very different from R.  Also, you first establish a connection to the database and work with the connection, not data frame.  `duckplyr` to the rescue. The speed boost comes from a [columnar-vectorized query execution engine](https://duckdb.org/why_duckdb#fast).
 
 
-```{r}
+```{r do duckdb}
 
 do_duckdb <- function(df = tidy_df, use_tidy = TRUE) {
    # duckdb_register(con, "duck_df",overwrite = TRUE, orig_df)
    if (use_tidy) {
       if ("duckplyr_df" %in% class(df)) {
+         # df was converted outside of function
          result <- df |>
             group_by(city) |>
             summarize(
@@ -315,6 +325,7 @@ do_duckdb <- function(df = tidy_df, use_tidy = TRUE) {
             )
          return(result)
       } else {
+         # convert df to duck right now
          result <- as_duckplyr_df(df) |>
             group_by(city) |>
             summarize(
@@ -326,7 +337,8 @@ do_duckdb <- function(df = tidy_df, use_tidy = TRUE) {
       }
    } else {
       con <- dbConnect(duckdb::duckdb())
-      duckdb_register(con, "duck_df", overwrite = TRUE, df)
+      # use global tidy_df so it doesn't matter what df was fed to function
+      duckdb_register(con, "duck_df", overwrite = TRUE, tidy_df)
       # achieve the same result with dbGetQuery
       result <- dbGetQuery(
          con,
@@ -341,26 +353,30 @@ do_duckdb <- function(df = tidy_df, use_tidy = TRUE) {
 
 duck_df <- as_duckplyr_df(tidy_df)
 
-bm_duckdb <- microbenchmark(do_duckdb(tidy_df,use_tidy = FALSE),
-                            do_duckdb(tidy_df,use_tidy = TRUE),
+bm_duckdb <- microbenchmark(do_duckdb(tidy_df,use_tidy = TRUE),
                             do_duckdb(duck_df,use_tidy = TRUE),
+                            do_duckdb(duck_df,use_tidy = FALSE),
                             times = 1, unit="seconds")
-bm_duckdb
+qbench(bm_duckdb) |> gt()
 
 ```
 
-So this is interesting.  Converting to a `duckDB` object adds essentially no overhead but the using the tidy vernacular is far slower than native.  I suspect the internals of opening and closing the database connection are to blame.  `duckdb` is competitive with `polars` but only in native mode.  There is no point in using `duckplyr` if you care about speed or you absolutely refuse to translate your query into SQL.
+So this is interesting.  Converting to a `duckDB` object adds essentially no overhead but the using the tidy vernacular is far slower than native.  I suspect the internals of opening and closing the database connection are to blame.  `duckdb` is competitive with `polars` but only in native mode.  If speeding up your execution times is the priority, I cannot recommend the `duckplyr` wrapper. Brush up on your SQL chops, instead.
 
 ## Conclusion
 
 Before drawing any conclusions, let's throw out a couple caveats.  The summary statistics we are calculating are very simple. If you are doing something more complex, the results may be different.  I urge you do to your own tests. Further, the data set is all in memory.  If you are working with data on disk, the results may be different.  Coverage of the `Tidyverse` is not complete for all these wrappers.  Some of your data wrangling pipelines may not work. 
 
 With that in mind, let's compare the alt-databases the way you would typically see them benchmarked, using their native interfaces and data frame formats.
-```{r}
+```{r bm comparison}
 bm <- rbind(bm_dt, bm_arrow, bm_polars, bm_duckdb)
-bm[c(2,3,6,8,12),] |> as_tibble() |> 
-   transmute(method = expr,seconds = time/1e9) |> arrange(seconds) |> 
-   mutate(method = str_extract(method,"do_.*\\(") |> str_remove("do_") |> str_remove("\\(") |> str_to_title()) |>
+
+native_exprs <- c("do_dplyr(tidy_df)","do_data.table(DT_df, force_tidy = FALSE)","do_arrow(arrow_df)",
+"do_polars(polars_lazy)","do_duckdb(duck_df, use_tidy = FALSE)")
+
+bm |> qbench() |> 
+   filter(expr %in% native_exprs) |>
+   mutate(method = str_extract(expr,"do_.*\\(") |> str_remove("do_") |> str_remove("\\(") |> str_to_title()) |>
    ggplot(aes(x = fct_reorder(method,seconds), y = seconds)) + geom_col() + coord_flip() +
    labs(title = "Performance of Native Alt-databases",
         subtitle = "Time in seconds (lower is better)",
@@ -371,15 +387,22 @@ It looks like both `duckDB` and `polars` offer significant speed advantages over
 
 Since this post is for people who are interested in speeding up R database operations AND who prefer using `tidyverse` syntax, lets summarize the performance of the four contenders using their tidyverse wrappers around the native data frame formats. Remember, this is not showing which database is fastest.  It is showing which database is fastest when using `tidyverse` syntax.
 
-```{r}
-bm_tidy <- rbind(bm_dt, bm_arrow, bm_polars, bm_duckdb)
-bm[c(2,4,6,10,13),] |> as_tibble() |> 
-   transmute(method = expr,seconds = time/1e9) |> arrange(seconds) |> 
-   mutate(method = str_extract(method,"do_.*\\(") |> str_remove("do_") |> str_remove("\\(") |> str_to_title()) |>
+```{r bm comparison tidy}
+bm_tidy_exprs <- c(
+   'do_dplyr(tidy_df)',
+   'do_data.table(DT_df, force_tidy = TRUE)',
+   'do_arrow(arrow_df)',
+   'do_polars(polars_df, force_tidy = TRUE)',
+   'do_duckdb(duck_df, use_tidy = TRUE)'
+)
+
+bm |> qbench() |> 
+   filter(expr %in% bm_tidy_exprs) |>
+   mutate(method = str_extract(expr,"do_.*\\(") |> str_remove("do_") |> str_remove("\\(") |> str_to_title()) |>
    ggplot(aes(x = fct_reorder(method,seconds), y = seconds)) + geom_col() + coord_flip() +
    labs(title = "Performance of Tidyverse Wrappers",
         subtitle = "Time in seconds (lower is better)",
-        x = "Method Wrapped with Dplyr Verbs", y = "Seconds") +
+        x = "Database Wrapped with Dplyr Verbs", y = "Seconds") +
    theme_minimal()
 ```
 The clear winner is `polars`.  While both `polars` and `duckdb` are competitive in native mode, the tidyverse wrapper for `duckdb` is a performance killer.  To get the most benefit from `polars` you should read and write your data files in `parquet` format and only convert `polars` objects to `tibble` when you are ready to do some plotting or other non-database operations.
